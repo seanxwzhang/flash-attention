@@ -10,7 +10,8 @@ import torch.nn as nn
 import flash_attn_2_cuda as flash_attn_cuda
 
 # isort: on
-
+SOFTMAX = flash_attn_cuda.SOFTMAX
+SYMPOWER = flash_attn_cuda.SYMPOWER
 
 def _get_block_size_n(device, head_dim, is_dropout, is_causal):
     # This should match the block sizes in the CUDA kernel
@@ -78,6 +79,8 @@ def _flash_attn_varlen_forward(
     softmax_scale,
     causal,
     window_size=(-1, -1),
+    similarity=SOFTMAX,
+    deg=4,
     softcap=0.0,
     alibi_slopes=None,
     return_softmax=False,
@@ -87,28 +90,32 @@ def _flash_attn_varlen_forward(
 ):
     maybe_contiguous = lambda x: x.contiguous() if x.stride(-1) != 1 else x
     q, k, v = [maybe_contiguous(x) for x in (q, k, v)]
-    out, q, k, v, out_padded, softmax_lse, S_dmask, rng_state = flash_attn_cuda.varlen_fwd(
-        q,
-        k,
-        v,
-        None,
-        cu_seqlens_q,
-        cu_seqlens_k,
-        seqused_k,
-        leftpad_k,
-        block_table,
-        alibi_slopes,
-        max_seqlen_q,
-        max_seqlen_k,
-        dropout_p,
-        softmax_scale,
-        False,
-        causal,
-        window_size[0],
-        window_size[1],
-        softcap,
-        return_softmax,
-        None,
+    out, q, k, v, out_padded, softmax_lse, S_dmask, rng_state = (
+        flash_attn_cuda.varlen_fwd(
+            q,
+            k,
+            v,
+            None,
+            cu_seqlens_q,
+            cu_seqlens_k,
+            seqused_k,
+            leftpad_k,
+            block_table,
+            alibi_slopes,
+            max_seqlen_q,
+            max_seqlen_k,
+            dropout_p,
+            softmax_scale,
+            False,
+            causal,
+            window_size[0],
+            window_size[1],
+            similarity,
+            deg,
+            softcap,
+            return_softmax,
+            None,
+        )
     )
     # if out.isnan().any() or softmax_lse.isnan().any():
     #     breakpoint()
@@ -129,6 +136,8 @@ def _flash_attn_backward(
     softmax_scale,
     causal,
     window_size,
+    similarity,
+    deg,
     softcap,
     alibi_slopes,
     deterministic,
@@ -158,6 +167,8 @@ def _flash_attn_backward(
         causal,
         window_size[0],
         window_size[1],
+        similarity,
+        deg,
         softcap,
         deterministic,
         None,
@@ -184,6 +195,8 @@ def _flash_attn_varlen_backward(
     softmax_scale,
     causal,
     window_size,
+    similarity,
+    deg,
     softcap,
     alibi_slopes,
     deterministic,
@@ -218,6 +231,8 @@ def _flash_attn_varlen_backward(
         causal,
         window_size[0],
         window_size[1],
+        similarity,
+        deg,
         softcap,
         deterministic,
         None,
@@ -237,6 +252,8 @@ class FlashAttnQKVPackedFunc(torch.autograd.Function):
         softmax_scale,
         causal,
         window_size,
+        similarity,
+        deg,
         softcap,
         alibi_slopes,
         deterministic,
@@ -252,6 +269,8 @@ class FlashAttnQKVPackedFunc(torch.autograd.Function):
             softmax_scale,
             causal=causal,
             window_size=window_size,
+            similarity=similarity,
+            deg=deg,
             softcap=softcap,
             alibi_slopes=alibi_slopes,
             return_softmax=return_softmax and dropout_p > 0,
@@ -261,6 +280,8 @@ class FlashAttnQKVPackedFunc(torch.autograd.Function):
         ctx.softmax_scale = softmax_scale
         ctx.causal = causal
         ctx.window_size = window_size
+        ctx.similarity = similarity
+        ctx.deg = deg
         ctx.softcap = softcap
         ctx.alibi_slopes = alibi_slopes
         ctx.deterministic = deterministic
@@ -285,6 +306,8 @@ class FlashAttnQKVPackedFunc(torch.autograd.Function):
             ctx.softmax_scale,
             ctx.causal,
             ctx.window_size,
+            ctx.similarity,
+            ctx.deg,
             ctx.softcap,
             ctx.alibi_slopes,
             ctx.deterministic,
@@ -305,6 +328,8 @@ class FlashAttnVarlenQKVPackedFunc(torch.autograd.Function):
         softmax_scale,
         causal,
         window_size,
+        similarity,
+        deg,
         softcap,
         alibi_slopes,
         deterministic,
@@ -312,22 +337,26 @@ class FlashAttnVarlenQKVPackedFunc(torch.autograd.Function):
     ):
         if softmax_scale is None:
             softmax_scale = qkv.shape[-1] ** (-0.5)
-        out, q, k, v, out_padded, softmax_lse, S_dmask, rng_state = _flash_attn_varlen_forward(
-            qkv[:, 0],
-            qkv[:, 1],
-            qkv[:, 2],
-            cu_seqlens,
-            cu_seqlens,
-            max_seqlen,
-            max_seqlen,
-            dropout_p,
-            softmax_scale,
-            causal=causal,
-            window_size=window_size,
-            softcap=softcap,
-            alibi_slopes=alibi_slopes,
-            return_softmax=return_softmax and dropout_p > 0,
-            block_table=None,
+        out, q, k, v, out_padded, softmax_lse, S_dmask, rng_state = (
+            _flash_attn_varlen_forward(
+                qkv[:, 0],
+                qkv[:, 1],
+                qkv[:, 2],
+                cu_seqlens,
+                cu_seqlens,
+                max_seqlen,
+                max_seqlen,
+                dropout_p,
+                softmax_scale,
+                causal=causal,
+                window_size=window_size,
+                similarity=similarity,
+                deg=deg,
+                softcap=softcap,
+                alibi_slopes=alibi_slopes,
+                return_softmax=return_softmax and dropout_p > 0,
+                block_table=None,
+            )
         )
         ctx.save_for_backward(q, k, v, out_padded, softmax_lse, cu_seqlens, rng_state)
         ctx.dropout_p = dropout_p
@@ -335,6 +364,8 @@ class FlashAttnVarlenQKVPackedFunc(torch.autograd.Function):
         ctx.softmax_scale = softmax_scale
         ctx.causal = causal
         ctx.window_size = window_size
+        ctx.similarity = similarity
+        ctx.deg = deg
         ctx.softcap = softcap
         ctx.alibi_slopes = alibi_slopes
         ctx.deterministic = deterministic
@@ -363,6 +394,8 @@ class FlashAttnVarlenQKVPackedFunc(torch.autograd.Function):
             ctx.softmax_scale,
             ctx.causal,
             ctx.window_size,
+            ctx.similarity,
+            ctx.deg,
             ctx.softcap,
             ctx.alibi_slopes,
             ctx.deterministic,
@@ -382,6 +415,8 @@ class FlashAttnKVPackedFunc(torch.autograd.Function):
         softmax_scale,
         causal,
         window_size,
+        similarity,
+        deg,
         softcap,
         alibi_slopes,
         deterministic,
@@ -397,6 +432,8 @@ class FlashAttnKVPackedFunc(torch.autograd.Function):
             softmax_scale,
             causal=causal,
             window_size=window_size,
+            similarity=similarity,
+            deg=deg,
             softcap=softcap,
             alibi_slopes=alibi_slopes,
             return_softmax=return_softmax and dropout_p > 0,
@@ -406,6 +443,8 @@ class FlashAttnKVPackedFunc(torch.autograd.Function):
         ctx.softmax_scale = softmax_scale
         ctx.causal = causal
         ctx.window_size = window_size
+        ctx.similarity = similarity
+        ctx.deg = deg
         ctx.softcap = softcap
         ctx.alibi_slopes = alibi_slopes
         ctx.deterministic = deterministic
@@ -431,6 +470,8 @@ class FlashAttnKVPackedFunc(torch.autograd.Function):
             ctx.softmax_scale,
             ctx.causal,
             ctx.window_size,
+            ctx.similarity,
+            ctx.deg,
             ctx.softcap,
             ctx.alibi_slopes,
             ctx.deterministic,
@@ -455,6 +496,8 @@ class FlashAttnVarlenKVPackedFunc(torch.autograd.Function):
         softmax_scale,
         causal,
         window_size,
+        similarity,
+        deg,
         softcap,
         alibi_slopes,
         deterministic,
@@ -462,22 +505,26 @@ class FlashAttnVarlenKVPackedFunc(torch.autograd.Function):
     ):
         if softmax_scale is None:
             softmax_scale = q.shape[-1] ** (-0.5)
-        out, q, k, v, out_padded, softmax_lse, S_dmask, rng_state = _flash_attn_varlen_forward(
-            q,
-            kv[:, 0],
-            kv[:, 1],
-            cu_seqlens_q,
-            cu_seqlens_k,
-            max_seqlen_q,
-            max_seqlen_k,
-            dropout_p,
-            softmax_scale,
-            causal=causal,
-            window_size=window_size,
-            softcap=softcap,
-            alibi_slopes=alibi_slopes,
-            return_softmax=return_softmax and dropout_p > 0,
-            block_table=None,
+        out, q, k, v, out_padded, softmax_lse, S_dmask, rng_state = (
+            _flash_attn_varlen_forward(
+                q,
+                kv[:, 0],
+                kv[:, 1],
+                cu_seqlens_q,
+                cu_seqlens_k,
+                max_seqlen_q,
+                max_seqlen_k,
+                dropout_p,
+                softmax_scale,
+                causal=causal,
+                window_size=window_size,
+                similarity=similarity,
+                deg=deg,
+                softcap=softcap,
+                alibi_slopes=alibi_slopes,
+                return_softmax=return_softmax and dropout_p > 0,
+                block_table=None,
+            )
         )
         ctx.save_for_backward(
             q, k, v, out_padded, softmax_lse, cu_seqlens_q, cu_seqlens_k, rng_state
@@ -488,6 +535,8 @@ class FlashAttnVarlenKVPackedFunc(torch.autograd.Function):
         ctx.softmax_scale = softmax_scale
         ctx.causal = causal
         ctx.window_size = window_size
+        ctx.similarity = similarity
+        ctx.deg = deg
         ctx.softcap = softcap
         ctx.alibi_slopes = alibi_slopes
         ctx.deterministic = deterministic
@@ -517,6 +566,8 @@ class FlashAttnVarlenKVPackedFunc(torch.autograd.Function):
             ctx.softmax_scale,
             ctx.causal,
             ctx.window_size,
+            ctx.similarity,
+            ctx.deg,
             ctx.softcap,
             ctx.alibi_slopes,
             ctx.deterministic,
@@ -538,6 +589,8 @@ class FlashAttnFunc(torch.autograd.Function):
         softmax_scale,
         causal,
         window_size,
+        similarity,
+        deg,
         softcap,
         alibi_slopes,
         deterministic,
@@ -553,6 +606,8 @@ class FlashAttnFunc(torch.autograd.Function):
             softmax_scale,
             causal=causal,
             window_size=window_size,
+            similarity=similarity,
+            deg=deg,
             softcap=softcap,
             alibi_slopes=alibi_slopes,
             return_softmax=return_softmax and dropout_p > 0,
@@ -562,6 +617,8 @@ class FlashAttnFunc(torch.autograd.Function):
         ctx.softmax_scale = softmax_scale
         ctx.causal = causal
         ctx.window_size = window_size
+        ctx.similarity = similarity
+        ctx.deg = deg
         ctx.softcap = softcap
         ctx.alibi_slopes = alibi_slopes
         ctx.deterministic = deterministic
@@ -585,6 +642,8 @@ class FlashAttnFunc(torch.autograd.Function):
             ctx.softmax_scale,
             ctx.causal,
             ctx.window_size,
+            ctx.similarity,
+            ctx.deg,
             ctx.softcap,
             ctx.alibi_slopes,
             ctx.deterministic,
@@ -611,6 +670,8 @@ class FlashAttnVarlenFunc(torch.autograd.Function):
         softmax_scale,
         causal,
         window_size,
+        similarity,
+        deg,
         softcap,
         alibi_slopes,
         deterministic,
@@ -619,22 +680,26 @@ class FlashAttnVarlenFunc(torch.autograd.Function):
     ):
         if softmax_scale is None:
             softmax_scale = q.shape[-1] ** (-0.5)
-        out, q, k, v, out_padded, softmax_lse, S_dmask, rng_state = _flash_attn_varlen_forward(
-            q,
-            k,
-            v,
-            cu_seqlens_q,
-            cu_seqlens_k,
-            max_seqlen_q,
-            max_seqlen_k,
-            dropout_p,
-            softmax_scale,
-            causal=causal,
-            window_size=window_size,
-            softcap=softcap,
-            alibi_slopes=alibi_slopes,
-            return_softmax=return_softmax and dropout_p > 0,
-            block_table=block_table,
+        out, q, k, v, out_padded, softmax_lse, S_dmask, rng_state = (
+            _flash_attn_varlen_forward(
+                q,
+                k,
+                v,
+                cu_seqlens_q,
+                cu_seqlens_k,
+                max_seqlen_q,
+                max_seqlen_k,
+                dropout_p,
+                softmax_scale,
+                causal=causal,
+                window_size=window_size,
+                similarity=similarity,
+                deg=deg,
+                softcap=softcap,
+                alibi_slopes=alibi_slopes,
+                return_softmax=return_softmax and dropout_p > 0,
+                block_table=block_table,
+            )
         )
         ctx.save_for_backward(
             q, k, v, out_padded, softmax_lse, cu_seqlens_q, cu_seqlens_k, rng_state
@@ -645,6 +710,8 @@ class FlashAttnVarlenFunc(torch.autograd.Function):
         ctx.softmax_scale = softmax_scale
         ctx.causal = causal
         ctx.window_size = window_size
+        ctx.similarity = similarity
+        ctx.deg = deg
         ctx.softcap = softcap
         ctx.alibi_slopes = alibi_slopes
         ctx.deterministic = deterministic
@@ -672,6 +739,8 @@ class FlashAttnVarlenFunc(torch.autograd.Function):
             ctx.softmax_scale,
             ctx.causal,
             ctx.window_size,
+            ctx.similarity,
+            ctx.deg,
             ctx.softcap,
             ctx.alibi_slopes,
             ctx.deterministic,
@@ -689,6 +758,8 @@ def flash_attn_qkvpacked_func(
     softmax_scale=None,
     causal=False,
     window_size=(-1, -1),  # -1 means infinite context window
+    similarity=SOFTMAX,
+    deg=4,  # not effective unless similarity = sympower
     softcap=0.0,  # <=0.0 means deactivate
     alibi_slopes=None,
     deterministic=False,
@@ -734,6 +805,8 @@ def flash_attn_qkvpacked_func(
         softmax_scale,
         causal,
         window_size,
+        similarity,
+        deg,
         softcap,
         alibi_slopes,
         deterministic,
@@ -748,6 +821,8 @@ def flash_attn_kvpacked_func(
     softmax_scale=None,
     causal=False,
     window_size=(-1, -1),  # -1 means infinite context window
+    similarity=SOFTMAX,
+    deg=4,
     softcap=0.0,  # 0.0 means deactivated
     alibi_slopes=None,
     deterministic=False,
@@ -811,6 +886,8 @@ def flash_attn_kvpacked_func(
         softmax_scale,
         causal,
         window_size,
+        similarity,
+        deg,
         softcap,
         alibi_slopes,
         deterministic,
@@ -826,7 +903,9 @@ def flash_attn_func(
     softmax_scale=None,
     causal=False,
     window_size=(-1, -1),  # -1 means infinite context window
-    softcap=0.0, # 0.0 means deactivated
+    similarity=SOFTMAX,
+    deg=4,
+    softcap=0.0,  # 0.0 means deactivated
     alibi_slopes=None,
     deterministic=False,
     return_attn_probs=False,
@@ -887,6 +966,8 @@ def flash_attn_func(
         softmax_scale,
         causal,
         window_size,
+        similarity,
+        deg,
         softcap,
         alibi_slopes,
         deterministic,
@@ -902,7 +983,9 @@ def flash_attn_varlen_qkvpacked_func(
     softmax_scale=None,
     causal=False,
     window_size=(-1, -1),  # -1 means infinite context window
-    softcap=0.0, # 0.0 means deactivated
+    similarity=SOFTMAX,
+    deg=4,
+    softcap=0.0,  # 0.0 means deactivated
     alibi_slopes=None,
     deterministic=False,
     return_attn_probs=False,
@@ -952,6 +1035,8 @@ def flash_attn_varlen_qkvpacked_func(
         softmax_scale,
         causal,
         window_size,
+        similarity,
+        deg,
         softcap,
         alibi_slopes,
         deterministic,
@@ -970,7 +1055,9 @@ def flash_attn_varlen_kvpacked_func(
     softmax_scale=None,
     causal=False,
     window_size=(-1, -1),  # -1 means infinite context window
-    softcap=0.0, # 0.0 means deactivated
+    similarity=SOFTMAX,
+    deg=4,  # not effective unless similarity = SYMPOWER
+    softcap=0.0,  # 0.0 means deactivated
     alibi_slopes=None,
     deterministic=False,
     return_attn_probs=False,
@@ -1043,6 +1130,8 @@ def flash_attn_varlen_kvpacked_func(
         softmax_scale,
         causal,
         window_size,
+        similarity,
+        deg,
         softcap,
         alibi_slopes,
         deterministic,
@@ -1062,7 +1151,9 @@ def flash_attn_varlen_func(
     softmax_scale=None,
     causal=False,
     window_size=(-1, -1),  # -1 means infinite context window
-    softcap=0.0, # 0.0 means deactivated
+    similarity=SOFTMAX,
+    deg=4,  # not effective unless similarity = SYMPOWER
+    softcap=0.0,  # 0.0 means deactivated
     alibi_slopes=None,
     deterministic=False,
     return_attn_probs=False,
@@ -1135,6 +1226,8 @@ def flash_attn_varlen_func(
         softmax_scale,
         causal,
         window_size,
+        similarity,
+        deg,
         softcap,
         alibi_slopes,
         deterministic,
@@ -1158,7 +1251,9 @@ def flash_attn_with_kvcache(
     softmax_scale=None,
     causal=False,
     window_size=(-1, -1),  # -1 means infinite context window
-    softcap=0.0, # 0.0 means deactivated
+    similarity=SOFTMAX,
+    deg=4,
+    softcap=0.0,  # 0.0 means deactivated
     rotary_interleaved=True,
     alibi_slopes=None,
     num_splits=0,
@@ -1282,6 +1377,8 @@ def flash_attn_with_kvcache(
         causal,
         window_size[0],
         window_size[1],
+        similarity,
+        deg,
         softcap,
         rotary_interleaved,
         num_splits,

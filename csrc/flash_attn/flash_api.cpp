@@ -43,6 +43,8 @@ void set_params_fprop(Flash_fwd_params &params,
                       float softmax_scale,
                       int window_size_left,
                       int window_size_right,
+                      SimilarityType similarity,
+                      int deg,
                       const float softcap,
                       bool seqlenq_ngroups_swapped=false,
                       const bool unpadded_lse=false) {
@@ -99,6 +101,10 @@ void set_params_fprop(Flash_fwd_params &params,
     params.seqlen_k_rounded = seqlen_k_rounded;
     params.d = d;
     params.d_rounded = d_rounded;
+
+    // Set similarities
+    params.is_sympower = similarity == sympower;
+    params.deg = deg;
 
     // Set the different scale values.
     #ifdef FLASHATTENTION_DISABLE_SOFTCAP
@@ -184,6 +190,8 @@ void set_params_dgrad(Flash_bwd_params &params,
                       float softmax_scale,
                       int window_size_left,
                       int window_size_right,
+                      SimilarityType similarity,
+                      int deg,
                       const float softcap,
                       bool deterministic,
                       const bool unpadded_lse) {
@@ -200,6 +208,8 @@ void set_params_dgrad(Flash_bwd_params &params,
                      softmax_scale,
                      window_size_left,
                      window_size_right,
+                     similarity,
+                     deg,
                      softcap,
                      false, // seqlenq_ngroups_swapped
                      unpadded_lse);
@@ -348,6 +358,8 @@ mha_fwd(at::Tensor &q,         // batch_size x seqlen_q x num_heads x head_size
         bool is_causal,
         int window_size_left,
         int window_size_right,
+        SimilarityType similarity,
+        int deg,
         const float softcap,
         const bool return_softmax,
         c10::optional<at::Generator> gen_) {
@@ -473,6 +485,8 @@ mha_fwd(at::Tensor &q,         // batch_size x seqlen_q x num_heads x head_size
                      softmax_scale,
                      window_size_left,
                      window_size_right,
+                     similarity,
+                     deg,
                      softcap
                      );
 
@@ -543,6 +557,8 @@ mha_varlen_fwd(at::Tensor &q,  // total_q x num_heads x head_size, total_q := \s
                bool is_causal,
                int window_size_left,
                int window_size_right,
+               SimilarityType similarity,
+               int deg,
                const float softcap,
                const bool return_softmax,
                c10::optional<at::Generator> gen_) {
@@ -713,6 +729,8 @@ mha_varlen_fwd(at::Tensor &q,  // total_q x num_heads x head_size, total_q := \s
                      softmax_scale,
                      window_size_left,
                      window_size_right,
+                     similarity,
+                     deg,
                      softcap,
                      seqlenq_ngroups_swapped,
                      /*unpadded_lse*/true);
@@ -812,6 +830,8 @@ mha_bwd(const at::Tensor &dout,  // batch_size x seqlen_q x num_heads, x head_si
         const bool is_causal,
         int window_size_left,
         int window_size_right,
+        SimilarityType similarity,
+        int deg,
         const float softcap,
         const bool deterministic,
         c10::optional<at::Generator> gen_,
@@ -977,6 +997,8 @@ mha_bwd(const at::Tensor &dout,  // batch_size x seqlen_q x num_heads, x head_si
                      softmax_scale,
                      window_size_left,
                      window_size_right,
+                     similarity,
+                     deg,
                      softcap,
                      deterministic,
                      /*unpadded_lse*/false);
@@ -1047,6 +1069,8 @@ mha_varlen_bwd(const at::Tensor &dout,  // total_q x num_heads, x head_size
                const bool is_causal,
                int window_size_left,
                int window_size_right,
+               SimilarityType similarity,
+               int deg,
                const float softcap,
                const bool deterministic,
                c10::optional<at::Generator> gen_,
@@ -1230,6 +1254,8 @@ mha_varlen_bwd(const at::Tensor &dout,  // total_q x num_heads, x head_size
                      softmax_scale,
                      window_size_left,
                      window_size_right,
+                     similarity,
+                     deg,
                      softcap,
                      deterministic,
                      /*unpadded_lse*/true);
@@ -1298,6 +1324,8 @@ mha_fwd_kvcache(at::Tensor &q,                 // batch_size x seqlen_q x num_he
                 bool is_causal,
                 int window_size_left,
                 int window_size_right,
+                SimilarityType similarity,
+                int deg,
                 const float softcap,
                 bool is_rotary_interleaved,   // if true, rotary combines indices 0 & 1, else indices 0 & rotary_dim / 2
                 int num_splits
@@ -1435,6 +1463,8 @@ mha_fwd_kvcache(at::Tensor &q,                 // batch_size x seqlen_q x num_he
                      softmax_scale,
                      window_size_left,
                      window_size_right,
+                     similarity,
+                     deg,
                      softcap
                      );
 
@@ -1568,4 +1598,8 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
     m.def("bwd", &mha_bwd, "Backward pass");
     m.def("varlen_bwd", &mha_varlen_bwd, "Backward pass (variable length)");
     m.def("fwd_kvcache", &mha_fwd_kvcache, "Forward pass, with KV-cache");
+    py::enum_<SimilarityType>(m, "SimilarityType")
+        .value("SOFTMAX", SimilarityType::softmax)
+        .value("SYMPOWER", SimilarityType::sympower)
+        .export_values();
 }
