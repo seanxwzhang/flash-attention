@@ -9,11 +9,11 @@ import torch.nn.functional as F
 from torch import Tensor
 from torchvision.ops import StochasticDepth
 
-from flash_attn.modules.mha import MHA
-from flash_attn.modules.mlp import Mlp
+from flash_attn_manifest.modules.mha import MHA
+from flash_attn_manifest.modules.mlp import Mlp
 
 try:
-    from flash_attn.ops.triton.layer_norm import layer_norm_fn, RMSNorm
+    from flash_attn_manifest.ops.triton.layer_norm import layer_norm_fn, RMSNorm
 except ImportError:
     layer_norm_fn, RMSNorm = None, None
 
