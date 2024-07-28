@@ -193,6 +193,9 @@ struct Flash_bwd_params : public Flash_fwd_params {
 
     bool deterministic;
     index_t dq_accum_split_stride;
+
+    SimilarityType similarity;
+    int deg;
 };
 
 ////////////////////////////////////////////////////////////////////////////////////////////////////
