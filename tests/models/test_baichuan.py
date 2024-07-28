@@ -10,18 +10,18 @@ from einops import rearrange
 
 from transformers import AutoConfig, AutoTokenizer, AutoModelForCausalLM
 
-from flash_attn.models.gpt import (
+from flash_attn_manifest.models.gpt import (
     GPTLMHeadModel,
     combine_state_dicts_tp,
     shard_state_dict_tp,
 )
-from flash_attn.models.baichuan import (
+from flash_attn_manifest.models.baichuan import (
     remap_state_dict_hf_baichuan,
     baichuan_config_to_gpt2_config,
 )
-from flash_attn.utils.distributed import all_gather_raw
-from flash_attn.utils.pretrained import state_dict_from_pretrained
-from flash_attn.utils.generation import update_graph_cache
+from flash_attn_manifest.utils.distributed import all_gather_raw
+from flash_attn_manifest.utils.pretrained import state_dict_from_pretrained
+from flash_attn_manifest.utils.generation import update_graph_cache
 
 
 @pytest.mark.parametrize(

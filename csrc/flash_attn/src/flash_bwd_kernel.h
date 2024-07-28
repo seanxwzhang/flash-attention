@@ -475,6 +475,30 @@ inline __device__ void compute_dq_dk_dv_1colblock(const Params &params, const in
         Tensor scores = make_tensor(acc_s.data(), flash::convert_layout_acc_rowcol(acc_s.layout()));
         // if (cute::thread(32, 0)) { print(scores); }
 
+        // Apply abslogp, but first keep the original scores
+        // TODO(sean): is_sympower should be made a constexpr parameter 
+        //             to save this allocation for softmax path
+        Tensor scores_orig = make_tensor_like(scores);
+
+        if (params.is_sympower) {
+            // if (cute::thread0()) {
+            //     printf("bwd path apply abslogp params.deg = %d\n", params.deg);
+            // }
+            #pragma unroll
+            for (int i = 0; i < size(scores); ++i) {
+                // if (cute::thread0()) {
+                //     printf("before scores_orig(i): %f\n", scores_orig(i));
+                // }
+                scores_orig(i) = scores(i);
+            }
+            flash::apply_abslogp(scores, 1e-6f, params.deg);
+            for (int i = 0; i < size(scores); ++i) {
+                // if (cute::thread0()) {
+                //     printf("after apply_abslogp scores(i): %f\n", scores(i));
+                // }
+            }
+        }
+
         if (Has_alibi) {
             alibi.apply_alibi(scores, n_block * kBlockN + (tidx / 32 / AtomLayoutMS) * MMA_N_SdP * 16,
                               m_block * kBlockM + get<0>(taccScS_row(0)), AtomLayoutMS * 16);
@@ -517,9 +541,18 @@ inline __device__ void compute_dq_dk_dv_1colblock(const Params &params, const in
 
         }
 
-        // if (cute::thread(32, 0)) { print(scores); }
+        // for (int i = 0; i < size(scores); ++i) {
+        //     if (cute::thread0()) {
+        //         printf("before scale_apply_exp2 scores(%d): %f\n", i, scores(i));
+        //     }
+        // }
         // Compute the exponential value.
         flash::scale_apply_exp2</*scale_max=*/false>(scores, lse, params.scale_softmax_log2);
+        // for (int i = 0; i < size(scores); ++i) {
+        //     if (cute::thread0()) {
+        //         printf("after scale_apply_exp2 scores(%d): %f\n", i, scores(i));
+        //     }
+        // }
         if constexpr (Is_dropout) {
             int warp_id = tidx / 32;
             int block_row_idx = m_block * (kBlockM / 16) + warp_id % AtomLayoutMS;
@@ -570,11 +603,45 @@ inline __device__ void compute_dq_dk_dv_1colblock(const Params &params, const in
         auto pointwise_mult = [](float p, float dp, float d) {
             return p * (!Is_dropout || p >= 0 ? dp - d : d);
         };
-        #pragma unroll
-        for (int mi = 0; mi < size<0>(dS); ++mi) {
+        if (params.is_sympower) {
+            // if (cute::thread0()) {
+            //     printf("bwd path apply multiplication params.deg = %d\n", params.deg);
+            // }
+            float sign;
             #pragma unroll
-            for (int ni = 0; ni < size<1>(dS); ++ni) {
-                dS(mi, ni) = pointwise_mult(scores(mi, ni), dS(mi, ni), dP_sum(mi));
+            for (int mi = 0; mi < size<0>(dS); ++mi) {
+                #pragma unroll
+                for (int ni = 0; ni < size<1>(dS); ++ni) {
+                    // if (cute::thread0()) {
+                    //     printf("dS(mi, ni) = %f\n", dS(mi, ni));
+                    //     printf("dP_sum(mi) = %f\n", dP_sum(mi));
+                    //     printf("scores(mi, ni) = %f\n", scores(mi, ni));
+                    // }
+                    dS(mi, ni) = pointwise_mult(scores(mi, ni), dS(mi, ni), dP_sum(mi));
+                    // one more backprop
+                    sign = scores_orig(mi, ni) < 0 ? -1.0 : 1.0;
+                    // if (cute::thread0()) {
+                    //     printf("scores(mi, ni) = %f\n", scores(mi, ni));
+                    //     printf("scores_orig(mi, ni) = %f\n", scores_orig(mi, ni));
+                    //     printf("before dS(mi, ni) = %f\n", dS(mi, ni));
+                    // }
+                    // dS(mi, ni) = (params.deg / (scores_orig(mi, ni) + sign * 1e-6f)) * dS(mi, ni);
+                    dS(mi, ni) = sign * params.deg / (cuda_abs(scores_orig(mi, ni)) + 1e-6f) * dS(mi, ni);
+                    // dS(mi, ni) = scores_orig(mi, ni) < 0 ? (params.deg / (scores_orig(mi, ni) - 1e-6f)) * dS(mi, ni) : (params.deg / (scores_orig(mi, ni) + 1e-6f)) * dS(mi, ni);
+
+                    // dS(mi, ni) = static_cast<float>(static_cast<double>(sign * params.deg) / static_cast<double>((cuda_abs(scores_orig(mi, ni)) + 1e-6f))) * dS(mi, ni);
+                    // if (cute::thread0()) {
+                    //     printf("after dS(mi, ni) = %f\n", dS(mi, ni));
+                    // }
+                }
+            }
+        } else {
+            #pragma unroll
+            for (int mi = 0; mi < size<0>(dS); ++mi) {
+                #pragma unroll
+                for (int ni = 0; ni < size<1>(dS); ++ni) {
+                    dS(mi, ni) = pointwise_mult(scores(mi, ni), dS(mi, ni), dP_sum(mi));
+                }
             }
         }
         // if (cute::thread0()) { print(dS); }

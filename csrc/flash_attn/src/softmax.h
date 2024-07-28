@@ -61,6 +61,56 @@ __device__ __forceinline__ void reduce_sum(Tensor<Engine0, Layout0> const& tenso
     thread_reduce_<zero_init>(tensor, sum, sum_op);
 }
 
+template <typename T>
+__device__ __forceinline__ T cuda_abs(T value);
+
+// Specialization for __half (float16)
+template <>
+__device__ __forceinline__ __half cuda_abs<__half>(__half value) {
+    return __habs(value);
+}
+
+// Specialization for __nv_bfloat16
+template <>
+__device__ __forceinline__ __nv_bfloat16 cuda_abs<__nv_bfloat16>(__nv_bfloat16 value) {
+    return __habs(value);
+}
+
+// Specialization for float
+template <>
+__device__ __forceinline__ float cuda_abs<float>(float value) {
+    return fabsf(value);
+}
+
+// Apply abs to all elements.
+template <typename Engine0, typename Layout0>
+__forceinline__ __device__ void apply_abslogp(Tensor<Engine0, Layout0> &scores, const float epsilon, const int power) {
+    static_assert(Layout0::rank == 2, "Only support 2D Tensor");
+    #pragma unroll
+    for (int mi = 0; mi < size<0>(scores); ++mi) {
+        #pragma unroll
+        for (int ni = 0; ni < size<1>(scores); ++ni) {
+            // maintain semantics of mask
+            // if (cute::thread0()) {
+            //     printf("before abslog: scores(%d, %d) = %f\n", mi, ni, scores(mi, ni));
+            //     if (scores(mi, ni) == -INFINITY)  {
+            //         printf("scores(mi, ni) == -INFINITY\n");
+            //     } else {
+            //         printf("fabsf(scores(mi, ni)) + epsilon: %f\n", fabsf(scores(mi, ni)) + epsilon);
+            //         printf("log(static_cast<double>(fabsf(scores(mi, ni)) + epsilon)): %f\n", log(static_cast<double>(fabsf(scores(mi, ni)) + epsilon)));
+            //         printf("power * log(static_cast<double>(fabsf(scores(mi, ni)) + epsilon)): %f\n", power * log(static_cast<double>(fabsf(scores(mi, ni)) + epsilon)));
+            //     }
+            // }
+            scores(mi, ni) = scores(mi, ni) == -INFINITY ? -INFINITY : power * logf(cuda_abs(scores(mi, ni)) + epsilon);
+
+            // scores(mi, ni) = scores(mi, ni) == -INFINITY ? -INFINITY : static_cast<float>(power * log(static_cast<double>(cuda_abs(scores(mi, ni)) + epsilon)));
+            // if (cute::thread0()) {
+            //     printf("after abslog: scores(%d, %d) = %f\n", mi, ni, scores(mi, ni));
+            // }
+        }
+    }
+}
+
 // Apply the exp to all the elements.
 template <bool Scale_max=true, typename Engine0, typename Layout0, typename Engine1, typename Layout1>
 __forceinline__ __device__ void scale_apply_exp2(Tensor<Engine0, Layout0> &tensor, Tensor<Engine1, Layout1> const &max, const float scale) {
@@ -81,11 +131,17 @@ __forceinline__ __device__ void scale_apply_exp2(Tensor<Engine0, Layout0> &tenso
             // The following macro will disable the use of fma.
             // See: https://github.com/pytorch/pytorch/issues/121558 for more details
             // This macro is set in PyTorch and not FlashAttention
-            #ifdef UNFUSE_FMA
-                tensor(mi, ni) = exp2f(__fmul_rn(tensor(mi, ni), scale) - max_scaled);
-            #else
-                tensor(mi, ni) = exp2f(tensor(mi, ni) * scale - max_scaled);
-            #endif
+            // #ifdef UNFUSE_FMA
+            //     tensor(mi, ni) = exp2f(__fmul_rn(tensor(mi, ni), scale) - max_scaled);
+            // #else
+            // if (cute::thread0()) {
+            //     printf("scale: %f, max_scaled: %f, tensor(%d, %d): %f\n", scale, max_scaled, mi, ni, tensor(mi, ni));
+            // }
+            tensor(mi, ni) = exp2f(tensor(mi, ni) * scale - max_scaled);
+            // if (cute::thread0()) {
+            //     printf("exp2f(tensor(%d, %d) * scale - max_scaled): %f\n", mi, ni, tensor(mi, ni));
+            // }
+            // #endif
         }
     }
 }
@@ -129,14 +185,22 @@ struct Softmax {
 
     using TensorT = decltype(make_tensor<float>(Shape<Int<kNRows>>{}));
     TensorT row_max, row_sum;
+    bool is_sympower;
+    int deg;
 
-    __forceinline__ __device__ Softmax() {};
+    __forceinline__ __device__ Softmax(bool is_sympower, int deg) : is_sympower(is_sympower), deg(deg) {};
 
     template<bool Is_first, bool Check_inf=false, typename Tensor0, typename Tensor1>
     __forceinline__ __device__ void softmax_rescale_o(Tensor0 &acc_s, Tensor1 &acc_o, float softmax_scale_log2) {
         // Reshape acc_s from (MMA=4, MMA_M, MMA_N) to (nrow=(2, MMA_M), ncol=(2, MMA_N))
         Tensor scores = make_tensor(acc_s.data(), flash::convert_layout_acc_rowcol(acc_s.layout()));
         static_assert(decltype(size<0>(scores))::value == kNRows);
+        if (is_sympower) {
+            // if (cute::thread0()) {
+            //     printf("softmax_rescale_o, deg: %d\n", deg);
+            // }
+            flash::template apply_abslogp(scores, 1e-6f, deg);
+        }
         if (Is_first) {
             flash::template reduce_max</*zero_init=*/true>(scores, row_max);
             flash::scale_apply_exp2(scores, row_max, softmax_scale_log2);

@@ -7,7 +7,7 @@ import torch.nn as nn
 
 # isort: off
 # We need to import the CUDA kernels after importing torch
-import flash_attn_2_cuda as flash_attn_cuda
+import flash_attn_manifest_2_cuda as flash_attn_cuda
 
 # isort: on
 SOFTMAX = flash_attn_cuda.SOFTMAX

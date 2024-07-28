@@ -4,10 +4,13 @@ import time
 import pytest
 import torch
 from einops import rearrange
-from flash_attn.models.gpt import GPTLMHeadModel
-from flash_attn.models.opt import opt_config_to_gpt2_config, remap_state_dict_hf_opt
-from flash_attn.utils.generation import update_graph_cache
-from flash_attn.utils.pretrained import state_dict_from_pretrained
+from flash_attn_manifest.models.gpt import GPTLMHeadModel
+from flash_attn_manifest.models.opt import (
+    opt_config_to_gpt2_config,
+    remap_state_dict_hf_opt,
+)
+from flash_attn_manifest.utils.generation import update_graph_cache
+from flash_attn_manifest.utils.pretrained import state_dict_from_pretrained
 from transformers import AutoTokenizer, OPTConfig
 from transformers.models.opt.modeling_opt import OPTForCausalLM
 
